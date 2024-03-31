@@ -798,6 +798,10 @@ fn main() {
         .with_env_filter(EnvFilter::from_default_env())
         .init();
 
+        let path = std::path::Path::new(env!("OUT_DIR"))
+                .join("shaders").join("shader.frag");
+            println!("path: {:?}", path); // appears to be right
+
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event()
         .build()
         .unwrap();
