@@ -1,8 +1,14 @@
-use ash::extensions::ext::debug_utils;
-use ash::extensions::ext::metal_surface;
-use ash::extensions::khr::win32_surface;
-use ash::extensions::mvk::macos_surface;
-use ash::vk::ext::queue_family_foreign;
+// use ash::extensions::ext::debug_utils;
+use ash::ext::debug_utils;
+// use ash::extensions::ext::metal_surface;
+// use ash::extensions::khr::win32_surface;
+// use ash::extensions::mvk::macos_surface;
+use ash::ext::metal_surface;
+use ash::khr::win32_surface;
+use ash::mvk::macos_surface;
+use ash::khr::swapchain;
+// use ash::vk:::ext::queue_family_foreign;
+use ash::ext::queue_family_foreign;
 use ash::vk::{self, DebugUtilsMessengerCreateInfoEXT};
 use ash::vk::{
     PFN_vkEnumerateInstanceExtensionProperties, PresentModeKHR, SurfaceCapabilitiesKHR,
@@ -27,7 +33,8 @@ use winit::{
     window::Window,
 };
 
-use ash::extensions::khr::surface;
+// use ash::extensions::khr::surface;
+use ash::khr::surface;
 
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
@@ -120,13 +127,17 @@ impl QueueFamilyIndices {
 }
 
 #[cfg(target_os = "windows")]
-const DEVICE_ENABLED_EXTENSION_NAMES: [*const c_char; 1] =
-    [ash::extensions::khr::swapchain::NAME.as_ptr()];
+const DEVICE_ENABLED_EXTENSION_NAMES: [*const c_char; 1] =[
+    // ash::extensions::khr::swapchain::NAME.as_ptr()
+    swapchain::NAME.as_ptr()
+];
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 const DEVICE_ENABLED_EXTENSION_NAMES: [*const c_char; 2] = [
-    ash::extensions::khr::swapchain::NAME.as_ptr(),
-    ash::vk::khr::portability_subset::NAME.as_ptr(),
+    // ash::extensions::khr::swapchain::NAME.as_ptr(),
+    // ash::vk::khr::portability_subset::NAME.as_ptr(),
+    ash::khr::swapchain::NAME.as_ptr(),
+    ash::khr::portability_subset::NAME.as_ptr(),
 ];
 
 struct VulkanApp {
@@ -149,7 +160,7 @@ struct VulkanApp {
 
     // swapchain
     swapchain: vk::SwapchainKHR,
-    swapchain_loader: ash::extensions::khr::swapchain::Device,
+    swapchain_loader: swapchain::Device,
     swapchain_image_format: vk::Format,
     swapchain_extent: vk::Extent2D,
 
@@ -158,7 +169,7 @@ struct VulkanApp {
 
     // debug
     debug_messenger: Option<(
-        ash::extensions::ext::debug_utils::Instance,
+        debug_utils::Instance,
         vk::DebugUtilsMessengerEXT,
     )>,
 }
@@ -386,7 +397,7 @@ impl VulkanApp {
         queue_family_indices: &QueueFamilyIndices,
     ) -> ash::prelude::VkResult<(
         vk::SwapchainKHR,
-        ash::extensions::khr::swapchain::Device,
+        swapchain::Device,
         Vec<vk::Image>,
         vk::Format,
         vk::Extent2D,
@@ -479,7 +490,7 @@ impl VulkanApp {
             };
 
         unsafe {
-            let swapchain_loader = ash::extensions::khr::swapchain::Device::new(&instance, &device);
+            let swapchain_loader = swapchain::Device::new(&instance, &device);
             match swapchain_loader.create_swapchain(&swapchain_create_info, None) {
                 Ok(swapchain) => {
                     info!("Swapchain created successfully");
@@ -681,12 +692,12 @@ impl VulkanApp {
     fn required_extension_names(entry: &ash::Entry) -> Vec<*const c_char> {
         // let mut extension_names = vec![Surface::name().as_ptr(), DebugUtils::name().as_ptr()];
         let mut extension_names = vec![
-            ash::extensions::khr::surface::NAME.as_ptr(),
-            ash::extensions::ext::debug_utils::NAME.as_ptr(),
+            surface::NAME.as_ptr(),
+            debug_utils::NAME.as_ptr(),
         ];
 
         #[cfg(all(windows))]
-        extension_names.extend([ash::extensions::khr::win32_surface::NAME.as_ptr()]);
+        extension_names.extend([win32_surface::NAME.as_ptr()]);
 
         #[cfg(target_os = "macos")]
         extension_names.extend([
@@ -793,7 +804,7 @@ impl VulkanApp {
         entry: &ash::Entry,
         instance: &ash::Instance,
     ) -> Option<(
-        ash::extensions::ext::debug_utils::Instance,
+        debug_utils::Instance,
         vk::DebugUtilsMessengerEXT,
     )> {
         #[cfg(not_debug_assertions)]
@@ -802,7 +813,7 @@ impl VulkanApp {
         let debug_create_info: DebugUtilsMessengerCreateInfoEXT =
             Self::populate_debug_messenger_create_info();
 
-        let debug_utils_loader = ash::extensions::ext::debug_utils::Instance::new(entry, instance);
+        let debug_utils_loader = debug_utils::Instance::new(entry, instance);
         let debug_messenger = unsafe {
             debug_utils_loader
                 .create_debug_utils_messenger(&debug_create_info, None)
