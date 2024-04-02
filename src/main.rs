@@ -1,4 +1,5 @@
 use ash::extensions::ext::debug_utils;
+use ash::extensions::ext::metal_surface;
 use ash::extensions::khr::win32_surface;
 use ash::extensions::mvk::macos_surface;
 use ash::vk::ext::queue_family_foreign;
@@ -118,8 +119,16 @@ impl QueueFamilyIndices {
     }
 }
 
+#[cfg(target_os = "windows")]
 const DEVICE_ENABLED_EXTENSION_NAMES: [*const c_char; 1] =
     [ash::extensions::khr::swapchain::NAME.as_ptr()];
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+const DEVICE_ENABLED_EXTENSION_NAMES: [*const c_char; 2] = [
+    ash::extensions::khr::swapchain::NAME.as_ptr(),
+    ash::vk::khr::portability_subset::NAME.as_ptr(),
+];
+
 struct VulkanApp {
     // window
     window: Arc<Window>,
@@ -174,6 +183,19 @@ impl VulkanApp {
                     );
                 let surface_fn = win32_surface::Instance::new(entry, instance);
                 surface_fn.create_win32_surface(&surface_desc, allocation_callbacks)
+            }
+            #[cfg(target_os = "macos")]
+            (RawDisplayHandle::AppKit(_), RawWindowHandle::AppKit(window)) => {
+                use raw_window_metal::{appkit, Layer};
+
+                let layer = match appkit::metal_layer_from_handle(window) {
+                    Layer::Existing(layer) | Layer::Allocated(layer) => layer.cast(),
+                };
+
+                let surface_desc = vk::MetalSurfaceCreateInfoEXT::default().layer(&*layer);
+                let surface_fn =
+                    ash::extensions::ext::metal_surface::Instance::new(entry, instance);
+                surface_fn.create_metal_surface(&surface_desc, allocation_callbacks)
             }
             _ => unimplemented!(),
         }
@@ -610,7 +632,7 @@ impl VulkanApp {
             Self::create_swapchain_images_views(&device, &swapchain_images, swapchain_image_format)
                 .unwrap();
 
-        // Self::create_graphics_pipeline();
+        Self::create_graphics_pipeline(&device);
 
         Ok(Self {
             window,
@@ -631,6 +653,31 @@ impl VulkanApp {
         })
     }
 
+    fn create_shader_module(device: &ash::Device, code: &[u32]) -> vk::ShaderModule {
+        let create_info = vk::ShaderModuleCreateInfo::default().code(code);
+        unsafe { device.create_shader_module(&create_info, None).unwrap() }
+    }
+
+    fn read_shader_from_file<P: AsRef<std::path::Path>>(path: P) -> Vec<u32> {
+        let mut file = std::fs::File::open(path).unwrap();
+        ash::util::read_spv(&mut file).unwrap()
+    }
+
+    fn create_graphics_pipeline(device: &ash::Device) {
+        let vert_shader_code =
+            Self::read_shader_from_file(concat!(env!("OUT_DIR"), "/shaders/shader.vert"));
+        let frag_shader_code =
+            Self::read_shader_from_file(concat!(env!("OUT_DIR"), "/shaders/shader.frag"));
+
+        let vert_shader_module = Self::create_shader_module(device, &vert_shader_code);
+        let frag_shader_module = Self::create_shader_module(device, &frag_shader_code);
+
+        unsafe {
+            device.destroy_shader_module(vert_shader_module, None);
+            device.destroy_shader_module(frag_shader_module, None);
+        };
+    }
+
     fn required_extension_names(entry: &ash::Entry) -> Vec<*const c_char> {
         // let mut extension_names = vec![Surface::name().as_ptr(), DebugUtils::name().as_ptr()];
         let mut extension_names = vec![
@@ -643,7 +690,7 @@ impl VulkanApp {
 
         #[cfg(target_os = "macos")]
         extension_names.extend([
-            MacOSSurface::name().as_ptr(),
+            metal_surface::NAME.as_ptr(),
             //vk::KhrPortabilityEnumerationFn::name().as_ptr(),
             vk::khr::portability_enumeration::NAME.as_ptr(),
             //vk::KhrGetPhysicalDeviceProperties2Fn::name().as_ptr(),
@@ -694,17 +741,14 @@ impl VulkanApp {
                 .expect("Failed to enumerate instance layers")
         };
 
-        let layer_names: Vec<&str> = vec!["VK_LAYER_KHRONOS_validation"];
+        let layer_names = vec![c"VK_LAYER_KHRONOS_validation"];
 
         for layer_name in layer_names.iter() {
             let mut layer_found = false;
 
             for layer_prop in layer_properties.iter() {
-                let test_name2 = unsafe {
-                    std::ffi::CStr::from_ptr(layer_prop.layer_name.as_ptr())
-                        .to_str()
-                        .expect("Failed to get layer name")
-                };
+                let test_name2 =
+                    unsafe { std::ffi::CStr::from_ptr(layer_prop.layer_name.as_ptr()) };
 
                 if *layer_name == test_name2 {
                     layer_found = true;
@@ -713,7 +757,10 @@ impl VulkanApp {
             }
 
             if !layer_found {
-                let err_msg = format!("Validation layer not found: {}", layer_name);
+                let err_msg = format!(
+                    "Validation layer not found: {}",
+                    layer_name.to_str().expect("jaja")
+                );
                 error!("{:?}", err_msg);
                 return Err(err_msg);
             }
@@ -770,7 +817,8 @@ impl Drop for VulkanApp {
     fn drop(&mut self) {
         unsafe {
             for i in 0..self.swapchain_images_views.len() {
-                self.device.destroy_image_view(self.swapchain_images_views[i], None);
+                self.device
+                    .destroy_image_view(self.swapchain_images_views[i], None);
             }
 
             self.swapchain_loader
@@ -798,9 +846,10 @@ fn main() {
         .with_env_filter(EnvFilter::from_default_env())
         .init();
 
-        let path = std::path::Path::new(env!("OUT_DIR"))
-                .join("shaders").join("shader.frag");
-            println!("path: {:?}", path); // appears to be right
+    let path = std::path::Path::new(env!("OUT_DIR"))
+        .join("shaders")
+        .join("shader.frag");
+    println!("path: {:?}", path); // appears to be right
 
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event()
         .build()

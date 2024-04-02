@@ -1,6 +1,6 @@
 use std::env;
-use std::process::Command;
 use std::path::Path;
+use std::process::Command;
 
 fn main() {
     println!("no puede ser");
@@ -8,11 +8,15 @@ fn main() {
     let vulkan_sdk = env::var("VULKAN_SDK").expect("VULKAN_SDK environment variable not set");
     let glsl_compiler;
     if cfg!(target_os = "windows") {
-         glsl_compiler = Path::new(&vulkan_sdk).join("Bin/glslc.exe");
-    }else if cfg!(all(unix, not(target_os = "android"), not(target_os = "macos"))) {
+        glsl_compiler = Path::new(&vulkan_sdk).join("Bin/glslc.exe");
+    } else if cfg!(all(
+        unix,
+        not(target_os = "android"),
+        not(target_os = "macos")
+    )) {
         glsl_compiler = Path::new(&vulkan_sdk).join("x86_64/bin/glslc");
-    }else{
-        unimplemented!("glsl compiler path must be defined!")
+    } else {
+        glsl_compiler = Path::new("/usr/local/bin/glslc").to_path_buf();
     }
 
     // Define the paths to your shader files and output directory.
@@ -26,7 +30,7 @@ fn main() {
         let output_path = output_dir.join(
             Path::new(shader_path)
                 .file_name()
-                .expect("Failed to extract file name")
+                .expect("Failed to extract file name"),
         );
 
         // Compile each shader using glslc.
