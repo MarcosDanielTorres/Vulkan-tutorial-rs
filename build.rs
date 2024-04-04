@@ -3,7 +3,6 @@ use std::path::Path;
 use std::process::Command;
 
 fn main() {
-    println!("no puede ser");
     // Locate the Vulkan SDK using an environment variable.
     let vulkan_sdk = env::var("VULKAN_SDK").expect("VULKAN_SDK environment variable not set");
     let glsl_compiler;
