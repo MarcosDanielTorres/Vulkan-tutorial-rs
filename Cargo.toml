@@ -17,3 +17,4 @@ thiserror = "1.0.58"
 log = "0.4.21"
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
+glam = "0.27.0"
