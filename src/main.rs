@@ -10,6 +10,8 @@ use ash::khr::win32_surface;
 use ash::mvk::macos_surface;
 // use ash::vk:::ext::queue_family_foreign;
 use ash::ext::queue_family_foreign;
+use ash::vk::PhysicalDeviceFeatures2KHR;
+use ash::vk::PhysicalDeviceVulkan13Features;
 use ash::vk::Queue;
 use ash::vk::{self, DebugUtilsMessengerCreateInfoEXT};
 use ash::vk::{PresentModeKHR, SurfaceCapabilitiesKHR, SurfaceFormatKHR, SurfaceKHR};
@@ -340,6 +342,9 @@ impl VulkanApp {
     ) -> Result<
         (
             vk::PhysicalDevice,
+            vk::PhysicalDeviceFeatures,
+            vk::PhysicalDeviceVulkan12Features<'static>,
+            PhysicalDeviceVulkan13Features<'static>,
             QueueFamilyIndices,
             SwapChainSupportDetails,
         ),
@@ -363,7 +368,28 @@ impl VulkanApp {
 
             for physical_device in physical_devices.iter() {
                 let properties = instance.get_physical_device_properties(*physical_device);
-                let features = instance.get_physical_device_features(*physical_device);
+
+                let physical_device_features = instance.get_physical_device_features(*physical_device);
+
+
+                
+                // FIXME I'm enabling all the supported features for now. I should enable only the ones I need.
+                // TODO This overwrites the `push_next` so I have no way, at the moment, of only enabling the features I want
+                // Vulkan 1.2 Features
+                let mut physical_device_12_features = vk::PhysicalDeviceVulkan12Features::default();
+                let mut _12 = vk::PhysicalDeviceFeatures2KHR::default().push_next(&mut physical_device_12_features);
+                instance.get_physical_device_features2(*physical_device, &mut _12);
+
+
+                // Vulkan 1.3 Features
+                // IMPORTANT:
+                let mut physical_device_13_features = vk::PhysicalDeviceVulkan13Features::default();
+                let mut _13 = PhysicalDeviceFeatures2KHR::default().push_next(&mut physical_device_13_features);
+                // This line overwrites the `push_next`. So I should print `features2` after this line if I want to see
+                // the features that are enabled for this GPU.
+                instance.get_physical_device_features2(*physical_device, &mut _13);
+
+
                 let device_name = CStr::from_ptr(properties.device_name.as_ptr())
                     .to_str()
                     .expect("Failed to get device name");
@@ -419,6 +445,9 @@ impl VulkanApp {
                     );
                     return Ok((
                         *physical_device,
+                        physical_device_features,
+                        physical_device_12_features,
+                        physical_device_13_features,
                         queue_families_indices,
                         swapchain_support_details,
                     ));
@@ -616,6 +645,16 @@ impl VulkanApp {
                     b: vk::ComponentSwizzle::B,
                     a: vk::ComponentSwizzle::A,
                 })
+                // Referenced here: https://vkguide.dev/docs/new_chapter_1/vulkan_mainloop_code/
+                // .subresource_range(
+                //     vk::ImageSubresourceRange::default()
+                //         .aspect_mask(vk::ImageAspectFlags::DEPTH or vk::ImageAspectFlags::color) based on 
+                // VK_IMAGE_LAYOUR_DEPTH_ATTACHMENT relative to the tutorial
+                //         .base_mip_level(0)
+                //         .level_count(vk::REMAINING_MIP_LEVELS)
+                //         .base_array_layer(0)
+                //         .layer_count(vk::REMAINING_ARRAY_LAYERS),
+                // );
                 .subresource_range(
                     vk::ImageSubresourceRange::default()
                         .aspect_mask(vk::ImageAspectFlags::COLOR)
@@ -637,6 +676,9 @@ impl VulkanApp {
     fn create_logical_device(
         instance: &ash::Instance,
         physical_device: &vk::PhysicalDevice,
+        physical_device_features: vk::PhysicalDeviceFeatures,
+        mut physical_device_12_features: vk::PhysicalDeviceVulkan12Features,
+        mut physical_device_13_features: PhysicalDeviceVulkan13Features,
         indices: QueueFamilyIndices,
     ) -> Result<ash::Device, String> {
         let mut unique_queue_families = HashSet::new();
@@ -652,12 +694,22 @@ impl VulkanApp {
             })
             .collect();
 
-        let device_features = vk::PhysicalDeviceFeatures::default();
+
+        // let mut test_12_features = vk::PhysicalDeviceVulkan12Features::default().buffer_device_address(true).descriptor_indexing(true);
+        // let mut vulkan_13_features = PhysicalDeviceVulkan13Features::default().dynamic_rendering(true).synchronization2(true);
+        // let mut vulkan_13_features = PhysicalDeviceVulkan13Features::default().dynamic_rendering(true).synchronization2(true).texture_compression_astc_hdr(true);
+
+
+        println!("---------------------------------\n");
+        println!("Device Features {:?}\n", physical_device_features);
+        println!("Device Features 1.2 {:?}\n", physical_device_12_features);
+        println!("Device Features 1.3 {:?}\n", physical_device_13_features);
 
         let create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_create_infos)
             .enabled_extension_names(&DEVICE_ENABLED_EXTENSION_NAMES)
-            .enabled_features(&device_features);
+            .enabled_features(&physical_device_features)
+            .push_next(&mut physical_device_13_features).push_next(&mut physical_device_12_features);
 
         unsafe {
             match instance.create_device(*physical_device, &create_info, None) {
@@ -687,7 +739,7 @@ impl VulkanApp {
         };
         let surface_loader: surface::Instance = surface::Instance::new(&entry, &instance);
 
-        let (physical_device, queue_family_indices, swapchain_support_details) =
+        let (physical_device, physical_device_features, physical_device_12_features, physical_device_13_features, queue_family_indices, swapchain_support_details) =
             Self::create_physical_device(&instance, &surface_loader, &surface)?;
 
         // TODO analyze if this should be inside `create_physical_device`
@@ -695,7 +747,8 @@ impl VulkanApp {
             unsafe { instance.get_physical_device_memory_properties(physical_device) };
 
         let device =
-            Self::create_logical_device(&instance, &physical_device, queue_family_indices)?;
+            Self::create_logical_device(&instance, &physical_device, physical_device_features, physical_device_12_features, physical_device_13_features, queue_family_indices)?;
+
 
         let graphics_queue =
             unsafe { device.get_device_queue(queue_family_indices.graphics_family.unwrap(), 0) };
@@ -829,7 +882,7 @@ impl VulkanApp {
         let mem_requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
         let memory_type_index: Option<u32> = Self::find_memorytype_index(
             &mem_requirements,
-            &memory_prop,
+            memory_prop,
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
         );
 
@@ -906,6 +959,8 @@ impl VulkanApp {
             .initial_layout(vk::ImageLayout::UNDEFINED)
             .final_layout(vk::ImageLayout::PRESENT_SRC_KHR);
 
+        // There is a mentioned of this layout here: https://vkguide.dev/docs/new_chapter_1/vulkan_mainloop_code/
+        // the `final_layout` in the article is `VK_IMAGE_LAYOUT_GENERAL` but I'm using `VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
         let color_attachment_ref = vk::AttachmentReference::default()
             .attachment(0)
             .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);

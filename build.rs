@@ -34,7 +34,7 @@ fn main() {
 
         // Compile each shader using glslc.
         Command::new(&glsl_compiler)
-            .args(&[shader_path, "-o", output_path.to_str().unwrap()])
+            .args([shader_path, "-o", output_path.to_str().unwrap()])
             .status()
             .expect("Failed to compile shader");
     }
