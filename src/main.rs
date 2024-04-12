@@ -1,14 +1,9 @@
-// use ash::extensions::ext::debug_utils;
 use ash::ext::debug_utils;
 use ash::prelude::VkResult;
-// use ash::extensions::ext::metal_surface;
-// use ash::extensions::khr::win32_surface;
-// use ash::extensions::mvk::macos_surface;
 use ash::ext::metal_surface;
 use ash::khr::swapchain;
 use ash::khr::win32_surface;
 use ash::mvk::macos_surface;
-// use ash::vk:::ext::queue_family_foreign;
 use ash::ext::queue_family_foreign;
 use ash::vk::PhysicalDeviceFeatures2KHR;
 use ash::vk::PhysicalDeviceVulkan13Features;
@@ -270,7 +265,7 @@ impl VulkanApp {
 
                 let surface_desc = vk::MetalSurfaceCreateInfoEXT::default().layer(&*layer);
                 let surface_fn =
-                    ash::extensions::ext::metal_surface::Instance::new(entry, instance);
+                    metal_surface::Instance::new(entry, instance);
                 surface_fn.create_metal_surface(&surface_desc, allocation_callbacks)
             }
             _ => unimplemented!(),
@@ -1137,10 +1132,8 @@ impl VulkanApp {
         #[cfg(target_os = "macos")]
         extension_names.extend([
             metal_surface::NAME.as_ptr(),
-            //vk::KhrPortabilityEnumerationFn::name().as_ptr(),
-            vk::khr::portability_enumeration::NAME.as_ptr(),
-            //vk::KhrGetPhysicalDeviceProperties2Fn::name().as_ptr(),
-            vk::khr::get_physical_device_properties2::NAME.as_ptr(),
+            ash::khr::portability_enumeration::NAME.as_ptr(),
+            ash::khr::get_physical_device_properties2::NAME.as_ptr(),
         ]);
 
         #[cfg(all(unix, not(target_os = "android"), not(target_os = "macos")))]
