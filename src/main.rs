@@ -806,6 +806,9 @@ impl VulkanApp {
                 .unwrap();
 
         let render_pass = Self::create_render_pass(&device, &swapchain_image_format).unwrap();
+
+        Self::create_descriptor_set_layout();
+
         let (pipeline, pipeline_layout) =
             Self::create_graphics_pipeline(&device, &swapchain_extent, &render_pass).unwrap();
 
@@ -1146,6 +1149,11 @@ impl VulkanApp {
     fn read_shader_from_file<P: AsRef<std::path::Path>>(path: P) -> Vec<u32> {
         let mut file = std::fs::File::open(path).unwrap();
         ash::util::read_spv(&mut file).unwrap()
+    }
+
+    fn create_descriptor_set_layout() {
+       let descriptor_set_layout_binding = vk::DescriptorSetLayoutBinding::default().binding(0).descriptor_type(vk::DescriptorType::UNIFORM_BUFFER).descriptor_count(1);
+       
     }
 
     fn create_graphics_pipeline(
