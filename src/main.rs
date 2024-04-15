@@ -7,10 +7,17 @@ use ash::vk::{
     PhysicalDeviceVulkan13Features, PresentModeKHR, SurfaceCapabilitiesKHR, SurfaceFormatKHR,
     SurfaceKHR,
 };
+use glam::Mat4;
+use glam::Vec3;
 use std::collections::HashSet;
+use std::f32::consts::PI;
+use std::ffi::c_void;
 use std::ffi::{c_char, CStr};
 use std::fmt;
+use std::fmt::Formatter;
 use std::sync::Arc;
+use std::time::Duration;
+use std::time::Instant;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 use winit::{
@@ -23,6 +30,39 @@ use winit::{
 
 // use ash::extensions::khr::surface;
 use ash::khr::surface;
+
+struct Clock {
+    is_valid: bool, // 0 or 1
+    previous_frame_instant: Instant,
+    total_elapsed_time: Duration,
+    delta_time: Duration,
+    fps: u16,
+}
+
+impl Clock {
+    pub fn tick(&mut self) {
+        // A silly way to avoid calling tick more than once in the same frame. If the `Clock` would be globally available.
+        // TODO change `is_valid` to a better name
+        if self.is_valid {
+            self.delta_time = self.previous_frame_instant.elapsed();
+            self.previous_frame_instant = Instant::now();
+            self.total_elapsed_time += self.delta_time;
+            self.fps = (1000.0 / (self.delta_time.as_secs_f64() * 1000.0)) as u16;
+        } else {
+            warn!("Clock is not valid. It was ticked more than once in the same frame.");
+        }
+    }
+}
+
+impl std::fmt::Debug for Clock {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Clock")
+            .field("FPS: ", &self.fps)
+            .field("delta time: ", &self.delta_time)
+            .field("total elapsed time: ", &self.total_elapsed_time)
+            .finish()
+    }
+}
 
 #[derive(Copy, Clone)]
 struct Vertex {
@@ -163,11 +203,20 @@ enum BufferType {
     Index,
 }
 
+#[derive(Debug)]
+struct UniformBufferObject {
+    model: glam::Mat4,
+    view: glam::Mat4,
+    proj: glam::Mat4,
+}
+
 struct VulkanApp {
     // window
     window: Arc<Window>,
 
     instance: ash::Instance,
+
+    clock: Clock,
 
     // devices
     physical_device: vk::PhysicalDevice,
@@ -207,6 +256,11 @@ struct VulkanApp {
 
     //pipeline
     pipeline: vk::Pipeline,
+
+    descriptor_set_layout: vk::DescriptorSetLayout,
+    descriptor_pool: vk::DescriptorPool,
+    descriptor_sets: Vec<vk::DescriptorSet>,
+
     pipeline_layout: vk::PipelineLayout,
 
     // buffers
@@ -216,6 +270,10 @@ struct VulkanApp {
 
     index_buffer: vk::Buffer,
     index_buffer_memory: vk::DeviceMemory,
+
+    uniform_buffers: Vec<vk::Buffer>,
+    uniform_buffers_memory: Vec<vk::DeviceMemory>,
+    uniform_buffers_mapped: Vec<*mut c_void>,
 
     // command buffer
     command_pool: vk::CommandPool,
@@ -739,6 +797,14 @@ impl VulkanApp {
     }
 
     pub fn new(window: Arc<Window>) -> Result<Self, String> {
+        let clock = Clock {
+            is_valid: true,
+            previous_frame_instant: Instant::now(),
+            total_elapsed_time: Duration::default(),
+            delta_time: Duration::default(),
+            fps: 0,
+        };
+
         // let entry = unsafe { ash::Entry::load().unwrap() };
         let entry = ash::Entry::linked();
 
@@ -807,10 +873,15 @@ impl VulkanApp {
 
         let render_pass = Self::create_render_pass(&device, &swapchain_image_format).unwrap();
 
-        Self::create_descriptor_set_layout();
+        let descriptor_set_layout = Self::create_descriptor_set_layout(&device).unwrap();
 
-        let (pipeline, pipeline_layout) =
-            Self::create_graphics_pipeline(&device, &swapchain_extent, &render_pass).unwrap();
+        let (pipeline, pipeline_layout) = Self::create_graphics_pipeline(
+            &device,
+            &swapchain_extent,
+            &render_pass,
+            &[descriptor_set_layout],
+        )
+        .unwrap();
 
         let swapchain_frame_buffers = Self::create_frame_buffers(
             &device,
@@ -844,6 +915,25 @@ impl VulkanApp {
         )
         .unwrap();
 
+        let (uniform_buffers, uniform_buffers_memory, uniform_buffers_mapped) =
+            Self::create_uniform_buffers(
+                &device,
+                &command_pool,
+                &graphics_queue,
+                &device_memory_properties,
+                std::mem::size_of::<UniformBufferObject>() as u64,
+                // std::mem::size_of_val(&Self::INDICES) as u64,
+            )
+            .unwrap();
+        let descriptor_pool = Self::create_descriptor_pool(&device).unwrap();
+        let descriptor_sets = Self::create_descriptor_sets(
+            &device,
+            descriptor_set_layout,
+            descriptor_pool,
+            &uniform_buffers,
+        )
+        .unwrap();
+
         let command_buffers = Self::create_command_buffers(&device, &command_pool).unwrap();
 
         let (image_available_semaphores, render_finished_semaphores, in_flight_fences) =
@@ -851,6 +941,7 @@ impl VulkanApp {
 
         Ok(Self {
             window,
+            clock,
 
             instance,
             debug_messenger,
@@ -881,14 +972,23 @@ impl VulkanApp {
             queue_family_indices,
             swapchain_support_details,
 
+            descriptor_set_layout,
+            descriptor_pool,
+            descriptor_sets,
+
             pipeline_layout,
             pipeline,
 
+            // buffers
             vertex_buffer,
             vertex_buffer_memory,
 
             index_buffer,
             index_buffer_memory,
+
+            uniform_buffers,
+            uniform_buffers_memory,
+            uniform_buffers_mapped,
 
             command_pool,
             command_buffers,
@@ -944,6 +1044,105 @@ impl VulkanApp {
         };
 
         Ok((buffer, buffer_memory))
+    }
+
+    fn create_descriptor_pool(device: &ash::Device) -> VkResult<vk::DescriptorPool> {
+        let pool_size = vk::DescriptorPoolSize::default()
+            .ty(vk::DescriptorType::UNIFORM_BUFFER)
+            .descriptor_count(Self::MAX_FRAMES_IN_FLIGHT as u32);
+
+        let pool_sizes = [pool_size];
+
+        let descriptor_pool_create_info = vk::DescriptorPoolCreateInfo::default()
+            .pool_sizes(&pool_sizes)
+            .max_sets(Self::MAX_FRAMES_IN_FLIGHT as u32);
+
+        unsafe { device.create_descriptor_pool(&descriptor_pool_create_info, None) }
+    }
+
+    fn create_descriptor_sets(
+        device: &ash::Device,
+        descriptor_set_layout: vk::DescriptorSetLayout,
+        descriptor_pool: vk::DescriptorPool,
+        uniform_buffers: &Vec<vk::Buffer>,
+    ) -> VkResult<Vec<vk::DescriptorSet>> {
+        // In our case we will create one descriptor set for each frame in flight, all with the same layout.
+        // Unfortunately we do need all the copies of the layout because the next function expects an array matching the number of sets.
+        let layouts = vec![descriptor_set_layout; Self::MAX_FRAMES_IN_FLIGHT];
+
+        let descriptor_set_allocate_info = vk::DescriptorSetAllocateInfo::default()
+            .descriptor_pool(descriptor_pool)
+            .set_layouts(&layouts);
+
+        let descriptor_sets = unsafe {
+            device
+                .allocate_descriptor_sets(&descriptor_set_allocate_info)
+                .unwrap()
+        };
+
+        for i in 0..Self::MAX_FRAMES_IN_FLIGHT {
+            let buffer_info = [vk::DescriptorBufferInfo::default()
+                .buffer(uniform_buffers[i])
+                .offset(0)
+                .range(std::mem::size_of::<UniformBufferObject>() as u64)];
+
+            let descriptor_write = vk::WriteDescriptorSet::default()
+                .dst_set(descriptor_sets[i])
+                .dst_binding(0)
+                .dst_array_element(0)
+                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                .buffer_info(&buffer_info);
+
+            unsafe {
+                device.update_descriptor_sets(&[descriptor_write], &[]);
+            }
+        }
+        Ok(descriptor_sets)
+    }
+
+    fn create_uniform_buffers(
+        device: &ash::Device,
+        command_pool: &vk::CommandPool,
+        graphics_queue: &vk::Queue,
+        memory_prop: &vk::PhysicalDeviceMemoryProperties,
+        // buffer_data: *const T,
+        // buffer_type: BufferType,
+        buffer_size: vk::DeviceSize,
+    ) -> VkResult<(Vec<vk::Buffer>, Vec<vk::DeviceMemory>, Vec<*mut c_void>)> {
+        let mut uniform_buffers = Vec::with_capacity(Self::MAX_FRAMES_IN_FLIGHT);
+        let mut uniform_buffers_memory = Vec::with_capacity(Self::MAX_FRAMES_IN_FLIGHT);
+        let mut uniform_buffers_mapped = Vec::with_capacity(Self::MAX_FRAMES_IN_FLIGHT);
+        for _ in 0..Self::MAX_FRAMES_IN_FLIGHT {
+            let (uniform_buffer, uniform_buffer_memory) = Self::create_buffer(
+                device,
+                buffer_size,
+                vk::BufferUsageFlags::UNIFORM_BUFFER,
+                memory_prop,
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            )
+            .unwrap();
+            uniform_buffers.push(uniform_buffer);
+            uniform_buffers_memory.push(uniform_buffer_memory);
+            // We map the buffer right after creation using vkMapMemory to get a pointer to which we can write the data later on.
+            // The buffer stays mapped to this pointer for the application's whole lifetime.
+            // This technique is called "persistent mapping" and works on all Vulkan implementations.
+            // Not having to map the buffer every time we need to update it increases performances, as mapping is not free.
+            uniform_buffers_mapped.push(unsafe {
+                device
+                    .map_memory(
+                        uniform_buffer_memory,
+                        0,
+                        buffer_size,
+                        vk::MemoryMapFlags::empty(),
+                    )
+                    .unwrap()
+            });
+        }
+        Ok((
+            uniform_buffers,
+            uniform_buffers_memory,
+            uniform_buffers_mapped,
+        ))
     }
 
     fn create_buffers<T>(
@@ -1146,20 +1345,31 @@ impl VulkanApp {
         unsafe { device.create_shader_module(&create_info, None).unwrap() }
     }
 
-    fn read_shader_from_file<P: AsRef<std::path::Path>>(path: P) -> Vec<u32> {
-        let mut file = std::fs::File::open(path).unwrap();
+    fn read_shader_from_file<P: AsRef<std::path::Path> + std::fmt::Debug>(path: P) -> Vec<u32> {
+        let mut file = match std::fs::File::open(&path) {
+            Ok(file) => std::io::BufReader::new(file),
+            Err(_) => panic!("Failed to open file: {:?}", &path),
+        };
         ash::util::read_spv(&mut file).unwrap()
     }
 
-    fn create_descriptor_set_layout() {
-       let descriptor_set_layout_binding = vk::DescriptorSetLayoutBinding::default().binding(0).descriptor_type(vk::DescriptorType::UNIFORM_BUFFER).descriptor_count(1);
-       
+    fn create_descriptor_set_layout(device: &ash::Device) -> VkResult<vk::DescriptorSetLayout> {
+        let descriptor_set_layout_binding = [vk::DescriptorSetLayoutBinding::default()
+            .binding(0)
+            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::VERTEX)];
+
+        let descriptor_set_layout_create_info =
+            vk::DescriptorSetLayoutCreateInfo::default().bindings(&descriptor_set_layout_binding);
+        unsafe { device.create_descriptor_set_layout(&descriptor_set_layout_create_info, None) }
     }
 
     fn create_graphics_pipeline(
         device: &ash::Device,
         swapchain_extent: &vk::Extent2D,
         render_pass: &vk::RenderPass,
+        set_layouts: &[vk::DescriptorSetLayout],
     ) -> VkResult<(vk::Pipeline, vk::PipelineLayout)> {
         let vert_shader_code =
             Self::read_shader_from_file(concat!(env!("OUT_DIR"), "/shaders/shader.vert"));
@@ -1211,7 +1421,7 @@ impl VulkanApp {
             .rasterizer_discard_enable(false)
             .polygon_mode(vk::PolygonMode::FILL)
             .line_width(1.0)
-            .cull_mode(vk::CullModeFlags::BACK)
+            .cull_mode(vk::CullModeFlags::NONE)
             .front_face(vk::FrontFace::CLOCKWISE)
             .depth_bias_enable(false);
 
@@ -1236,7 +1446,7 @@ impl VulkanApp {
         let dynamic_state_info =
             vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
 
-        let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default();
+        let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default().set_layouts(set_layouts);
 
         let pipeline_layout = unsafe {
             device
@@ -1412,6 +1622,10 @@ impl VulkanApp {
     }
 
     fn draw_frame(&mut self) {
+        self.clock.tick();
+        self.clock.is_valid = false;
+        // println!("{:?}", self.clock);
+
         unsafe {
             let curr_fence = self.in_flight_fences[self.current_frame];
             let curr_command_buffer = self.command_buffers[self.current_frame];
@@ -1423,7 +1637,6 @@ impl VulkanApp {
             self.device
                 .wait_for_fences(&[curr_fence], true, u64::MAX)
                 .unwrap();
-            self.device.reset_fences(&[curr_fence]).unwrap();
 
             let result = self.swapchain_loader.acquire_next_image(
                 self.swapchain,
@@ -1447,6 +1660,9 @@ impl VulkanApp {
                 }
             };
 
+            self.update_uniform_buffer();
+
+            self.device.reset_fences(&[curr_fence]).unwrap();
             self.device
                 .reset_command_buffer(curr_command_buffer, vk::CommandBufferResetFlags::empty())
                 .unwrap();
@@ -1494,6 +1710,30 @@ impl VulkanApp {
             };
 
             self.current_frame = (self.current_frame + 1) % Self::MAX_FRAMES_IN_FLIGHT;
+        }
+        self.clock.is_valid = true;
+    }
+
+    fn update_uniform_buffer(&mut self) {
+        let elapsed = self.clock.total_elapsed_time.as_secs_f32();
+        let mut proj = glam::Mat4::perspective_rh(
+            45.0 * PI / 180.0,
+            self.swapchain_extent.width as f32 / self.swapchain_extent.height as f32,
+            0.1,
+            10.0,
+        );
+        // proj[1][1] *= -1.0;
+
+        let ubo = UniformBufferObject {
+            model: Mat4::from_rotation_y(elapsed * (90.0 * PI / 180.0)),
+            view: Mat4::look_at_rh(Vec3::new(2.0, 2.0, 2.0), Vec3::new(0.0, 0.0, 0.0), Vec3::Y),
+            proj,
+        };
+
+        unsafe {
+            // TODO revisit this
+            let data = self.uniform_buffers_mapped[self.current_frame] as *mut UniformBufferObject;
+            *data = ubo;
         }
     }
 
@@ -1558,6 +1798,15 @@ impl VulkanApp {
                 self.index_buffer,
                 0,
                 vk::IndexType::UINT16,
+            );
+
+            self.device.cmd_bind_descriptor_sets(
+                *command_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.pipeline_layout,
+                0,
+                &[self.descriptor_sets[self.current_frame]],
+                &[],
             );
 
             // self.device.cmd_draw(*command_buffer, 3, 1, 0, 0);
@@ -1727,6 +1976,18 @@ impl Drop for VulkanApp {
             self.device.free_memory(self.vertex_buffer_memory, None);
 
             self.cleanup_swapchain();
+
+            for i in 0..Self::MAX_FRAMES_IN_FLIGHT {
+                self.device.destroy_buffer(self.uniform_buffers[i], None);
+                self.device
+                    .free_memory(self.uniform_buffers_memory[i], None);
+            }
+
+            self.device
+                .destroy_descriptor_pool(self.descriptor_pool, None);
+
+            self.device
+                .destroy_descriptor_set_layout(self.descriptor_set_layout, None);
 
             self.device.destroy_pipeline(self.pipeline, None);
 

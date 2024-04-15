@@ -1140,6 +1140,7 @@ dependencies = [
  "thiserror",
  "tracing",
  "tracing-subscriber",
+ "walkdir",
  "winit",
 ]
 
