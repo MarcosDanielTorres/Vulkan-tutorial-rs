@@ -225,6 +225,7 @@ struct VulkanApp {
 
     // devices
     physical_device: vk::PhysicalDevice,
+    physical_device_properties: vk::PhysicalDeviceProperties,
     device: ash::Device,
 
     // memory
@@ -287,6 +288,8 @@ struct VulkanApp {
     // textures
     texture_image: vk::Image,
     texture_image_memory: vk::DeviceMemory,
+    texture_image_view: vk::ImageView,
+    texture_sampler: vk::Sampler,
 
     // sync objects
     image_available_semaphores: Vec<vk::Semaphore>,
@@ -424,6 +427,7 @@ impl VulkanApp {
     ) -> Result<
         (
             vk::PhysicalDevice,
+            vk::PhysicalDeviceProperties,
             vk::PhysicalDeviceFeatures,
             vk::PhysicalDeviceVulkan12Features<'static>,
             PhysicalDeviceVulkan13Features<'static>,
@@ -526,6 +530,7 @@ impl VulkanApp {
                     );
                     return Ok((
                         *physical_device,
+                        properties,
                         physical_device_features,
                         physical_device_12_features,
                         physical_device_13_features,
@@ -643,10 +648,92 @@ impl VulkanApp {
         }
     }
 
+    fn create_texture_sampler(device: &ash::Device) -> VkResult<vk::Sampler> {
+        let sampler_info = vk::SamplerCreateInfo::default()
+            .mag_filter(vk::Filter::LINEAR)
+            .min_filter(vk::Filter::LINEAR)
+            .address_mode_u(vk::SamplerAddressMode::REPEAT)
+            .address_mode_v(vk::SamplerAddressMode::REPEAT)
+            .address_mode_w(vk::SamplerAddressMode::REPEAT)
+            .anisotropy_enable(true)
+            .max_anisotropy(16.0)
+            .border_color(vk::BorderColor::INT_OPAQUE_BLACK)
+            .unnormalized_coordinates(false)
+            .compare_enable(false)
+            .compare_op(vk::CompareOp::ALWAYS)
+            .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
+            .mip_lod_bias(0.0)
+            .min_lod(0.0)
+            .max_lod(0.0);
+
+        unsafe {
+            match device.create_sampler(&sampler_info, None) {
+                Ok(sampler) => Ok(sampler),
+                Err(err) => {
+                    let err_msg = format!("Failed to create texture sampler: {:?}", err);
+                    error!("{:?}", err_msg);
+                    Err(err)
+                }
+            }
+        }
+    }
+
+    fn create_texture_image_view(
+        device: &ash::Device,
+        texture_image: vk::Image,
+        format: vk::Format,
+    ) -> VkResult<vk::ImageView> {
+        return Self::create_image_view(device, texture_image, format);
+    }
+
+    fn create_image_view(
+        device: &ash::Device,
+        image: vk::Image,
+        format: vk::Format,
+    ) -> VkResult<vk::ImageView> {
+        let create_info = vk::ImageViewCreateInfo::default()
+            .image(image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(format)
+            .components(vk::ComponentMapping {
+                r: vk::ComponentSwizzle::R,
+                g: vk::ComponentSwizzle::G,
+                b: vk::ComponentSwizzle::B,
+                a: vk::ComponentSwizzle::A,
+            })
+            // Referenced here: https://vkguide.dev/docs/new_chapter_1/vulkan_mainloop_code/
+            // .subresource_range(
+            //     vk::ImageSubresourceRange::default()
+            //         .aspect_mask(vk::ImageAspectFlags::DEPTH or vk::ImageAspectFlags::color) based on
+            // VK_IMAGE_LAYOUR_DEPTH_ATTACHMENT relative to the tutorial
+            //         .base_mip_level(0)
+            //         .level_count(vk::REMAINING_MIP_LEVELS)
+            //         .base_array_layer(0)
+            //         .layer_count(vk::REMAINING_ARRAY_LAYERS),
+            // );
+            .subresource_range(
+                vk::ImageSubresourceRange::default()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .base_mip_level(0)
+                    .level_count(1)
+                    .base_array_layer(0)
+                    .layer_count(1),
+            );
+
+        match unsafe { device.create_image_view(&create_info, None) } {
+            Ok(view) => Ok(view),
+            Err(e) => {
+                error!("Failed to create image view: {:?}", e);
+                return Err(e);
+            }
+        }
+    }
+
     fn create_texture_image(
         device: &ash::Device,
         command_pool: &vk::CommandPool,
         graphics_queue: &vk::Queue,
+        format: vk::Format,
         memory_prop: &vk::PhysicalDeviceMemoryProperties,
     ) -> VkResult<(vk::Image, vk::DeviceMemory)> {
         let image = match image::open("src/textures/texture.jpg") {
@@ -692,7 +779,7 @@ impl VulkanApp {
             device,
             image.width(),
             image.height(),
-            vk::Format::R8G8B8A8_SRGB,
+            format,
             vk::ImageTiling::OPTIMAL,
             vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
             memory_prop,
@@ -705,7 +792,7 @@ impl VulkanApp {
             command_pool,
             graphics_queue,
             texture_image,
-            vk::Format::R8G8B8A8_SRGB,
+            format,
             vk::ImageLayout::UNDEFINED,
             vk::ImageLayout::TRANSFER_DST_OPTIMAL,
         );
@@ -723,7 +810,7 @@ impl VulkanApp {
             command_pool,
             graphics_queue,
             texture_image,
-            vk::Format::R8G8B8A8_SRGB,
+            format,
             vk::ImageLayout::TRANSFER_DST_OPTIMAL,
             vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
         );
@@ -964,36 +1051,7 @@ impl VulkanApp {
         let mut image_views = Vec::with_capacity(swapchain_images.len());
 
         for image in swapchain_images {
-            let create_info = vk::ImageViewCreateInfo::default()
-                .image(*image)
-                .view_type(vk::ImageViewType::TYPE_2D)
-                .format(swapchain_image_format)
-                .components(vk::ComponentMapping {
-                    r: vk::ComponentSwizzle::R,
-                    g: vk::ComponentSwizzle::G,
-                    b: vk::ComponentSwizzle::B,
-                    a: vk::ComponentSwizzle::A,
-                })
-                // Referenced here: https://vkguide.dev/docs/new_chapter_1/vulkan_mainloop_code/
-                // .subresource_range(
-                //     vk::ImageSubresourceRange::default()
-                //         .aspect_mask(vk::ImageAspectFlags::DEPTH or vk::ImageAspectFlags::color) based on
-                // VK_IMAGE_LAYOUR_DEPTH_ATTACHMENT relative to the tutorial
-                //         .base_mip_level(0)
-                //         .level_count(vk::REMAINING_MIP_LEVELS)
-                //         .base_array_layer(0)
-                //         .layer_count(vk::REMAINING_ARRAY_LAYERS),
-                // );
-                .subresource_range(
-                    vk::ImageSubresourceRange::default()
-                        .aspect_mask(vk::ImageAspectFlags::COLOR)
-                        .base_mip_level(0)
-                        .level_count(1)
-                        .base_array_layer(0)
-                        .layer_count(1),
-                );
-
-            match unsafe { device.create_image_view(&create_info, None) } {
+            match Self::create_image_view(device, *image, swapchain_image_format) {
                 Ok(view) => image_views.push(view),
                 Err(e) => return Err(e),
             }
@@ -1077,6 +1135,7 @@ impl VulkanApp {
 
         let (
             physical_device,
+            physical_device_properties,
             physical_device_features,
             physical_device_12_features,
             physical_device_13_features,
@@ -1148,13 +1207,23 @@ impl VulkanApp {
 
         let command_pool = Self::create_command_pool(&device, &queue_family_indices).unwrap();
 
+        let image_format = vk::Format::R8G8B8A8_SRGB;
         let (texture_image, texture_image_memory) = Self::create_texture_image(
             &device,
             &command_pool,
             &graphics_queue,
+            image_format,
             &device_memory_properties,
         )
         .unwrap();
+
+        let texture_image_view =
+            Self::create_texture_image_view(&device, texture_image, image_format).unwrap();
+        info!(
+            "Max sampler anisotropy: {}",
+            physical_device_properties.limits.max_sampler_anisotropy
+        );
+        let texture_sampler = Self::create_texture_sampler(&device).unwrap();
 
         let (vertex_buffer, vertex_buffer_memory) = Self::create_buffers(
             &device,
@@ -1209,6 +1278,7 @@ impl VulkanApp {
             instance,
             debug_messenger,
             physical_device,
+            physical_device_properties,
             device,
 
             graphics_queue,
@@ -1258,6 +1328,8 @@ impl VulkanApp {
 
             texture_image,
             texture_image_memory,
+            texture_image_view,
+            texture_sampler,
 
             // sync objects
             image_available_semaphores,
@@ -2309,6 +2381,9 @@ impl Drop for VulkanApp {
         unsafe {
             self.device.device_wait_idle().unwrap();
 
+            self.device.destroy_sampler(self.texture_sampler, None);
+            self.device
+                .destroy_image_view(self.texture_image_view, None);
             self.device.destroy_image(self.texture_image, None);
             self.device.free_memory(self.texture_image_memory, None);
 
