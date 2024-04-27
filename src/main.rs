@@ -9,7 +9,12 @@ use ash::vk::{
 };
 use glam::Mat4;
 use glam::Vec3;
+use image::buffer;
+use image::DynamicImage;
+use image::GenericImageView;
+use image::ImageError;
 use std::collections::HashSet;
+use std::error::Error;
 use std::f32::consts::PI;
 use std::ffi::c_void;
 use std::ffi::{c_char, CStr};
@@ -278,6 +283,10 @@ struct VulkanApp {
     // command buffer
     command_pool: vk::CommandPool,
     command_buffers: Vec<vk::CommandBuffer>,
+
+    // textures
+    texture_image: vk::Image,
+    texture_image_memory: vk::DeviceMemory,
 
     // sync objects
     image_available_semaphores: Vec<vk::Semaphore>,
@@ -567,6 +576,252 @@ impl VulkanApp {
         }
     }
 
+    fn create_image(
+        device: &ash::Device,
+        tex_width: u32,
+        tex_height: u32,
+        format: vk::Format,
+        image_tiling: vk::ImageTiling,
+        image_usages: vk::ImageUsageFlags,
+        memory_prop: &vk::PhysicalDeviceMemoryProperties,
+        memory_flags: vk::MemoryPropertyFlags,
+    ) -> VkResult<(vk::Image, vk::DeviceMemory)> {
+        let image_info = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .extent(
+                vk::Extent3D::default()
+                    .width(tex_width)
+                    .height(tex_height)
+                    .depth(1),
+            )
+            .mip_levels(1)
+            .array_layers(1)
+            // B8G8R8A8_UNORM
+            .format(format)
+            .tiling(image_tiling)
+            .initial_layout(vk::ImageLayout::UNDEFINED)
+            .usage(image_usages)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .samples(vk::SampleCountFlags::TYPE_1);
+
+        unsafe {
+            let texture_image = match device.create_image(&image_info, None) {
+                Ok(texture_image) => texture_image,
+                Err(err) => {
+                    let err_msg = format!("Failed to create texture image: {:?}", err);
+                    error!("{:?}", err_msg);
+                    panic!("{:?}", err_msg);
+                }
+            };
+
+            let mem_requirements = device.get_image_memory_requirements(texture_image);
+            let memory_type_index: Option<u32> =
+                Self::find_memorytype_index(&mem_requirements, memory_prop, memory_flags);
+
+            let alloc_info = vk::MemoryAllocateInfo::default()
+                .allocation_size(mem_requirements.size)
+                .memory_type_index(memory_type_index.unwrap());
+
+            // It should be noted that in a real world application, you're not supposed to actually call
+            // vkAllocateMemory for every individual buffer.
+            let memory = match device.allocate_memory(&alloc_info, None) {
+                Ok(memory) => {
+                    // TODO
+                    // lo saco para afuera, porque esta funcion va a formar parte de una funcion de alocacion y segun el error que tira podemos
+                    // decir si hubo error creando un vertex buffer memory or un texture image memory etc
+
+                    unsafe { device.bind_image_memory(texture_image, memory, 0) }.unwrap();
+                    memory
+                }
+                Err(err) => {
+                    let err_msg = format!("Failed to allocate image memory: {:?}", err);
+                    error!("{:?}", err_msg);
+                    panic!("{:?}", err_msg);
+                }
+            };
+            Ok((texture_image, memory))
+        }
+    }
+
+    fn create_texture_image(
+        device: &ash::Device,
+        command_pool: &vk::CommandPool,
+        graphics_queue: &vk::Queue,
+        memory_prop: &vk::PhysicalDeviceMemoryProperties,
+    ) -> VkResult<(vk::Image, vk::DeviceMemory)> {
+        let image = match image::open("src/textures/texture.jpg") {
+            Ok(image) => image,
+            Err(e) => {
+                error!("Failed to load image: {:?}", e);
+                panic!("Failed to load image: {:?}", e);
+            }
+        };
+
+        let image_size = vk::DeviceSize::from(image.width() * image.height() * 4);
+
+        // ----------------- TODO SCAR DE ACA -----------------------
+        // se comparte en todas las creaciones de staging buffers
+
+        let (staging_buffer, staging_buffer_memory) = Self::create_buffer(
+            device,
+            image_size,
+            vk::BufferUsageFlags::TRANSFER_SRC,
+            memory_prop,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        )
+        .unwrap();
+
+        unsafe {
+            let data = device
+                .map_memory(
+                    staging_buffer_memory,
+                    0,
+                    image_size,
+                    vk::MemoryMapFlags::empty(),
+                )
+                .unwrap();
+            let mut align =
+                ash::util::Align::new(data, std::mem::align_of::<u8>() as u64, image_size);
+            align.copy_from_slice(&image.as_bytes());
+            device.unmap_memory(staging_buffer_memory);
+        }
+
+        // ----------------- TODO SCAR DE ACA -----------------------
+
+        let (texture_image, texture_image_memory) = Self::create_image(
+            device,
+            image.width(),
+            image.height(),
+            vk::Format::R8G8B8A8_SRGB,
+            vk::ImageTiling::OPTIMAL,
+            vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
+            memory_prop,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+        )
+        .unwrap();
+
+        Self::transition_image_layout(
+            device,
+            command_pool,
+            graphics_queue,
+            texture_image,
+            vk::Format::R8G8B8A8_SRGB,
+            vk::ImageLayout::UNDEFINED,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+        );
+        Self::copy_buffer_to_image(
+            device,
+            command_pool,
+            graphics_queue,
+            staging_buffer,
+            texture_image,
+            image.width(),
+            image.height(),
+        );
+        Self::transition_image_layout(
+            device,
+            command_pool,
+            graphics_queue,
+            texture_image,
+            vk::Format::R8G8B8A8_SRGB,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        );
+
+        unsafe {
+            device.destroy_buffer(staging_buffer, None);
+            device.free_memory(staging_buffer_memory, None);
+        }
+
+        Ok((texture_image, texture_image_memory))
+    }
+
+    fn copy_buffer_to_image(
+        device: &ash::Device,
+        command_pool: &vk::CommandPool,
+        graphics_queue: &vk::Queue,
+        buffer: vk::Buffer,
+        image: vk::Image,
+        width: u32,
+        height: u32,
+    ) {
+        let command_buffer = Self::begin_single_time_commands(device, command_pool);
+        let command_buffers = [command_buffer];
+
+        let region = vk::BufferImageCopy::default()
+            .buffer_offset(0)
+            .buffer_row_length(0)
+            .buffer_image_height(0)
+            .image_subresource(
+                vk::ImageSubresourceLayers::default()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .mip_level(0)
+                    .base_array_layer(0)
+                    .layer_count(1),
+            )
+            .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+            .image_extent(vk::Extent3D {
+                width,
+                height,
+                depth: 1,
+            });
+
+        unsafe {
+            device.cmd_copy_buffer_to_image(
+                command_buffer,
+                buffer,
+                image,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &[region],
+            );
+        }
+
+        Self::end_single_time_commands(device, &command_buffer, command_pool, graphics_queue);
+    }
+
+    fn begin_single_time_commands(
+        device: &ash::Device,
+        command_pool: &vk::CommandPool,
+    ) -> vk::CommandBuffer {
+        let allocate_info = vk::CommandBufferAllocateInfo::default()
+            .command_pool(*command_pool)
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_buffer_count(1);
+
+        let command_buffer = unsafe { device.allocate_command_buffers(&allocate_info).unwrap()[0] };
+        unsafe {
+            device
+                .begin_command_buffer(
+                    command_buffer,
+                    &vk::CommandBufferBeginInfo::default()
+                        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+                )
+                .unwrap();
+        }
+        command_buffer
+    }
+
+    fn end_single_time_commands(
+        device: &ash::Device,
+        command_buffer: &vk::CommandBuffer,
+        command_pool: &vk::CommandPool,
+        graphics_queue: &vk::Queue,
+    ) {
+        unsafe {
+            device.end_command_buffer(*command_buffer).unwrap();
+
+            let command_buffers = [*command_buffer];
+            let submit_info = vk::SubmitInfo::default().command_buffers(&command_buffers);
+
+            device
+                .queue_submit(*graphics_queue, &[submit_info], vk::Fence::null())
+                .expect("Failed to submit queue");
+
+            device.queue_wait_idle(*graphics_queue).unwrap();
+            device.free_command_buffers(*command_pool, &command_buffers)
+        }
+    }
+
     fn create_swapchain(
         instance: &ash::Instance,
         device: &ash::Device,
@@ -581,7 +836,7 @@ impl VulkanApp {
         vk::Format,
         vk::Extent2D,
     )> {
-        let surface_format: SurfaceFormatKHR = *swapchain_support_details
+        let swapchain_image_format: SurfaceFormatKHR = *swapchain_support_details
             .formats
             .iter()
             .find(|format| {
@@ -632,8 +887,8 @@ impl VulkanApp {
         let swapchain_create_info = vk::SwapchainCreateInfoKHR::default()
             .surface(*surface)
             .min_image_count(image_count)
-            .image_format(surface_format.format)
-            .image_color_space(surface_format.color_space)
+            .image_format(swapchain_image_format.format)
+            .image_color_space(swapchain_image_format.color_space)
             .image_extent(extent)
             .image_array_layers(1)
             .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
@@ -681,7 +936,7 @@ impl VulkanApp {
                                 swapchain,
                                 swapchain_loader,
                                 swapchain_images,
-                                surface_format.format,
+                                swapchain_image_format.format,
                                 extent,
                             ))
                         }
@@ -893,6 +1148,14 @@ impl VulkanApp {
 
         let command_pool = Self::create_command_pool(&device, &queue_family_indices).unwrap();
 
+        let (texture_image, texture_image_memory) = Self::create_texture_image(
+            &device,
+            &command_pool,
+            &graphics_queue,
+            &device_memory_properties,
+        )
+        .unwrap();
+
         let (vertex_buffer, vertex_buffer_memory) = Self::create_buffers(
             &device,
             &command_pool,
@@ -993,6 +1256,9 @@ impl VulkanApp {
             command_pool,
             command_buffers,
 
+            texture_image,
+            texture_image_memory,
+
             // sync objects
             image_available_semaphores,
             render_finished_semaphores,
@@ -1020,6 +1286,8 @@ impl VulkanApp {
             }
         };
 
+        // ------------------ esto me lo puedo llevar a un modulo -----------------
+        // ------------------------- TODO -------------------------
         let mem_requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
         let memory_type_index: Option<u32> =
             Self::find_memorytype_index(&mem_requirements, memory_prop, memory_flags);
@@ -1032,7 +1300,10 @@ impl VulkanApp {
         // vkAllocateMemory for every individual buffer.
         let buffer_memory = match unsafe { device.allocate_memory(&alloc_info, None) } {
             Ok(buffer_memory) => {
-                // TODO Do error handling
+                // TODO
+                // lo saco para afuera, porque esta funcion va a formar parte de una funcion de alocacion y segun el error que tira podemos
+                // decir si hubo error creando un vertex buffer memory or un texture image memory etc
+
                 unsafe { device.bind_buffer_memory(buffer, buffer_memory, 0) }.unwrap();
                 buffer_memory
             }
@@ -1042,6 +1313,8 @@ impl VulkanApp {
                 panic!("{:?}", err_msg);
             }
         };
+        // ------------------------- TODO -------------------------
+        // ------------------ esto me lo puedo llevar a un modulo -----------------
 
         Ok((buffer, buffer_memory))
     }
@@ -1234,20 +1507,21 @@ impl VulkanApp {
         dst_buffer: vk::Buffer,
         size: vk::DeviceSize,
     ) {
-        let allocate_info = vk::CommandBufferAllocateInfo::default()
-            .command_pool(*command_pool)
-            .level(vk::CommandBufferLevel::PRIMARY)
-            .command_buffer_count(1);
+        // let allocate_info = vk::CommandBufferAllocateInfo::default()
+        //     .command_pool(*command_pool)
+        //     .level(vk::CommandBufferLevel::PRIMARY)
+        //     .command_buffer_count(1);
 
-        let command_buffer = unsafe { device.allocate_command_buffers(&allocate_info).unwrap()[0] };
+        // let command_buffer = unsafe { device.allocate_command_buffers(&allocate_info).unwrap()[0] };
         unsafe {
-            device
-                .begin_command_buffer(
-                    command_buffer,
-                    &vk::CommandBufferBeginInfo::default()
-                        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
-                )
-                .unwrap();
+            let command_buffer = Self::begin_single_time_commands(device, command_pool);
+            // device
+            //     .begin_command_buffer(
+            //         command_buffer,
+            //         &vk::CommandBufferBeginInfo::default()
+            //             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+            //     )
+            //     .unwrap();
 
             let regions = vk::BufferCopy::default()
                 .src_offset(0)
@@ -1255,19 +1529,85 @@ impl VulkanApp {
                 .size(size);
             device.cmd_copy_buffer(command_buffer, src_buffer, dst_buffer, &[regions]);
 
-            device
-                .end_command_buffer(command_buffer)
-                .expect("Failed to record command buffer");
+            Self::end_single_time_commands(device, &command_buffer, command_pool, graphics_queue)
 
-            let command_buffers = [command_buffer];
-            let submit_info = vk::SubmitInfo::default().command_buffers(&command_buffers);
-            device
-                .queue_submit(*graphics_queue, &[submit_info], vk::Fence::null())
-                .expect("Failed to submit queue");
+            // device
+            //     .end_command_buffer(command_buffer)
+            //     .expect("Failed to record command buffer");
 
-            device.queue_wait_idle(*graphics_queue).unwrap();
-            device.free_command_buffers(*command_pool, &command_buffers)
+            // let command_buffers = [command_buffer];
+            // let submit_info = vk::SubmitInfo::default().command_buffers(&command_buffers);
+            // device
+            //     .queue_submit(*graphics_queue, &[submit_info], vk::Fence::null())
+            //     .expect("Failed to submit queue");
+
+            // device.queue_wait_idle(*graphics_queue).unwrap();
+            // device.free_command_buffers(*command_pool, &command_buffers)
         };
+    }
+
+    fn transition_image_layout(
+        device: &ash::Device,
+        command_pool: &vk::CommandPool,
+        graphics_queue: &vk::Queue,
+        image: vk::Image,
+        format: vk::Format,
+        old_layout: vk::ImageLayout,
+        new_layout: vk::ImageLayout,
+    ) {
+        let command_buffer = Self::begin_single_time_commands(device, command_pool);
+
+        let mut image_barrier = vk::ImageMemoryBarrier::default()
+            .old_layout(old_layout)
+            .new_layout(new_layout)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .image(image)
+            .subresource_range(
+                vk::ImageSubresourceRange::default()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .base_mip_level(0)
+                    .level_count(1)
+                    .base_array_layer(0)
+                    .layer_count(1),
+            );
+
+        let source_stage;
+        let destination_stage;
+
+        if old_layout == vk::ImageLayout::UNDEFINED
+            && new_layout == vk::ImageLayout::TRANSFER_DST_OPTIMAL
+        {
+            image_barrier.src_access_mask = vk::AccessFlags::empty();
+            image_barrier.dst_access_mask = vk::AccessFlags::TRANSFER_WRITE;
+
+            source_stage = vk::PipelineStageFlags::TOP_OF_PIPE;
+            destination_stage = vk::PipelineStageFlags::TRANSFER;
+        } else if old_layout == vk::ImageLayout::TRANSFER_DST_OPTIMAL
+            && new_layout == vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL
+        {
+            image_barrier.src_access_mask = vk::AccessFlags::TRANSFER_WRITE;
+            image_barrier.dst_access_mask = vk::AccessFlags::SHADER_READ;
+
+            source_stage = vk::PipelineStageFlags::TRANSFER;
+            destination_stage = vk::PipelineStageFlags::FRAGMENT_SHADER;
+        } else {
+            panic!("Unsupported layout transition!");
+        }
+
+        unsafe {
+            device.cmd_pipeline_barrier(
+                command_buffer,
+                source_stage,
+                destination_stage,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[image_barrier],
+            );
+        }
+
+        Self::end_single_time_commands(device, &command_buffer, command_pool, graphics_queue)
     }
 
     pub fn find_memorytype_index(
@@ -1716,7 +2056,7 @@ impl VulkanApp {
 
     fn update_uniform_buffer(&mut self) {
         let elapsed = self.clock.total_elapsed_time.as_secs_f32();
-        let mut proj = glam::Mat4::perspective_rh(
+        let proj = glam::Mat4::perspective_rh(
             45.0 * PI / 180.0,
             self.swapchain_extent.width as f32 / self.swapchain_extent.height as f32,
             0.1,
@@ -1968,6 +2308,9 @@ impl Drop for VulkanApp {
     fn drop(&mut self) {
         unsafe {
             self.device.device_wait_idle().unwrap();
+
+            self.device.destroy_image(self.texture_image, None);
+            self.device.free_memory(self.texture_image_memory, None);
 
             self.device.destroy_buffer(self.index_buffer, None);
             self.device.free_memory(self.index_buffer_memory, None);
