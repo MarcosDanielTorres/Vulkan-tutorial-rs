@@ -26,6 +26,7 @@ use std::time::Duration;
 use std::time::Instant;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
+use winit::window::WindowBuilder;
 use winit::{
     event::{Event, KeyEvent, WindowEvent},
     event_loop::{ControlFlow, EventLoopBuilder, EventLoopWindowTarget},
@@ -212,6 +213,8 @@ const DEVICE_ENABLED_EXTENSION_NAMES: [*const c_char; 2] = [
     ash::khr::portability_subset::NAME.as_ptr(),
 ];
 
+const MODEL_PATH: &str = "src/models/viking_room.obj";
+const TEXTURE_PATH: &str = "src/textures/viking_room.png";
 enum BufferType {
     Vertex,
     Index,
@@ -286,6 +289,11 @@ struct VulkanApp {
     index_buffer: vk::Buffer,
     index_buffer_memory: vk::DeviceMemory,
 
+    // models
+    model_vertices: Vec<Vertex>,
+    // or maybe u16
+    model_indices: Vec<u32>,
+
     uniform_buffers: Vec<vk::Buffer>,
     uniform_buffers_memory: Vec<vk::DeviceMemory>,
     uniform_buffers_mapped: Vec<*mut c_void>,
@@ -317,50 +325,51 @@ struct VulkanApp {
 impl VulkanApp {
     const MAX_FRAMES_IN_FLIGHT: usize = 2;
 
-    const VERTICES: [Vertex; 8] = [
-        Vertex {
-            pos: [-0.5, -0.5, 0.0],
-            color: [1.0, 0.0, 0.0],
-            tex_coord: [1.0, 0.0],
-        },
-        Vertex {
-            pos: [0.5, -0.5, 0.0],
-            color: [0.0, 1.0, 0.0],
-            tex_coord: [0.0, 0.0],
-        },
-        Vertex {
-            pos: [0.5, 0.5, 0.0],
-            color: [0.0, 0.0, 1.0],
-            tex_coord: [0.0, 1.0],
-        },
-        Vertex {
-            pos: [-0.5, 0.5, 0.0],
-            color: [1.0, 1.0, 1.0],
-            tex_coord: [1.0, 1.0],
-        },
-        Vertex {
-            pos: [-0.5, -0.5, -0.5],
-            color: [1.0, 0.0, 0.0],
-            tex_coord: [1.0, 0.0],
-        },
-        Vertex {
-            pos: [0.5, -0.5, -0.5],
-            color: [0.0, 1.0, 0.0],
-            tex_coord: [0.0, 0.0],
-        },
-        Vertex {
-            pos: [0.5, 0.5, -0.5],
-            color: [0.0, 0.0, 1.0],
-            tex_coord: [0.0, 1.0],
-        },
-        Vertex {
-            pos: [-0.5, 0.5, -0.5],
-            color: [1.0, 1.0, 1.0],
-            tex_coord: [1.0, 1.0],
-        },
-    ];
+    // replaced by model
+    // const VERTICES: [Vertex; 8] = [
+    //     Vertex {
+    //         pos: [-0.5, -0.5, 0.0],
+    //         color: [1.0, 0.0, 0.0],
+    //         tex_coord: [1.0, 0.0],
+    //     },
+    //     Vertex {
+    //         pos: [0.5, -0.5, 0.0],
+    //         color: [0.0, 1.0, 0.0],
+    //         tex_coord: [0.0, 0.0],
+    //     },
+    //     Vertex {
+    //         pos: [0.5, 0.5, 0.0],
+    //         color: [0.0, 0.0, 1.0],
+    //         tex_coord: [0.0, 1.0],
+    //     },
+    //     Vertex {
+    //         pos: [-0.5, 0.5, 0.0],
+    //         color: [1.0, 1.0, 1.0],
+    //         tex_coord: [1.0, 1.0],
+    //     },
+    //     Vertex {
+    //         pos: [-0.5, -0.5, -0.5],
+    //         color: [1.0, 0.0, 0.0],
+    //         tex_coord: [1.0, 0.0],
+    //     },
+    //     Vertex {
+    //         pos: [0.5, -0.5, -0.5],
+    //         color: [0.0, 1.0, 0.0],
+    //         tex_coord: [0.0, 0.0],
+    //     },
+    //     Vertex {
+    //         pos: [0.5, 0.5, -0.5],
+    //         color: [0.0, 0.0, 1.0],
+    //         tex_coord: [0.0, 1.0],
+    //     },
+    //     Vertex {
+    //         pos: [-0.5, 0.5, -0.5],
+    //         color: [1.0, 1.0, 1.0],
+    //         tex_coord: [1.0, 1.0],
+    //     },
+    // ];
 
-    const INDICES: [u16; 12] = [0, 1, 2, 2, 3, 0, 4, 5, 6, 6, 7, 4];
+    // const INDICES: [u16; 12] = [0, 1, 2, 2, 3, 0, 4, 5, 6, 6, 7, 4];
 }
 
 impl VulkanApp {
@@ -861,7 +870,9 @@ impl VulkanApp {
         format: vk::Format,
         memory_prop: &vk::PhysicalDeviceMemoryProperties,
     ) -> VkResult<(vk::Image, vk::DeviceMemory)> {
-        let image = match image::open("src/textures/texture.jpg") {
+        // replaced by model
+        // let image = match image::open("src/textures/texture.jpg") {
+        let image = match image::open("src/textures/viking_room.png") {
             Ok(image) => image,
             Err(e) => {
                 error!("Failed to load image: {:?}", e);
@@ -1386,14 +1397,18 @@ impl VulkanApp {
         );
         let texture_sampler = Self::create_texture_sampler(&device).unwrap();
 
+        let (model_vertices, model_indices) = Self::load_model();
+
         let (vertex_buffer, vertex_buffer_memory) = Self::create_buffers(
             &device,
             &command_pool,
             &graphics_queue,
             &device_memory_properties,
-            Self::VERTICES.as_ptr(),
+            // Self::VERTICES.as_ptr(),
+            model_vertices.as_ptr(),
             BufferType::Vertex,
-            std::mem::size_of_val(&Self::VERTICES) as u64,
+            // std::mem::size_of_val(&Self::VERTICES) as u64,
+            std::mem::size_of::<Vertex>() as u64 * model_vertices.len() as u64,
         )
         .unwrap();
 
@@ -1402,9 +1417,11 @@ impl VulkanApp {
             &command_pool,
             &graphics_queue,
             &device_memory_properties,
-            Self::INDICES.as_ptr(),
+            // Self::INDICES.as_ptr(),
+            model_indices.as_ptr(),
             BufferType::Index,
-            std::mem::size_of_val(&Self::INDICES) as u64,
+            // std::mem::size_of_val(&Self::INDICES) as u64,
+            std::mem::size_of::<u32>() as u64 * model_indices.len() as u64,
         )
         .unwrap();
 
@@ -1498,6 +1515,10 @@ impl VulkanApp {
             depth_image,
             depth_image_memory,
             depth_image_view,
+
+            // models
+            model_vertices,
+            model_indices,
 
             // sync objects
             image_available_semaphores,
@@ -1674,6 +1695,33 @@ impl VulkanApp {
             uniform_buffers_memory,
             uniform_buffers_mapped,
         ))
+    }
+
+    fn load_model() -> (Vec<Vertex>, Vec<u32>) {
+        let mut vertices = vec![];
+        let mut indices = vec![];
+        let model = tobj::load_obj("src/models/viking_room.obj", &tobj::LoadOptions::default());
+        let (models, _materials) = model.unwrap();
+        for m in models.iter() {
+            let mesh = &m.mesh;
+            for f in 0..mesh.indices.len() {
+                let vertex = Vertex {
+                    pos: [
+                        mesh.positions[mesh.indices[f] as usize * 3],
+                        mesh.positions[mesh.indices[f] as usize * 3 + 1],
+                        mesh.positions[mesh.indices[f] as usize * 3 + 2],
+                    ],
+                    tex_coord: [
+                        mesh.texcoords[mesh.indices[f] as usize * 2],
+                        1.0 - mesh.texcoords[mesh.indices[f] as usize * 2 + 1],
+                    ],
+                    color: [1.0, 1.0, 1.0],
+                };
+                vertices.push(vertex);
+                indices.push(f as u32);
+            }
+        }
+        (vertices, indices)
     }
 
     fn create_buffers<T>(
@@ -2383,18 +2431,20 @@ impl VulkanApp {
 
     fn update_uniform_buffer(&mut self) {
         let elapsed = self.clock.total_elapsed_time.as_secs_f32();
-        let proj = glam::Mat4::perspective_rh(
+        let mut proj = glam::Mat4::perspective_rh(
             45.0 * PI / 180.0,
             self.swapchain_extent.width as f32 / self.swapchain_extent.height as f32,
             0.1,
             10.0,
         );
-        // proj[1][1] *= -1.0;
+        // i.e: proj[1][1] *= -1.0;
+        proj.col_mut(1)[1] *= -1.0;
 
         let ubo = UniformBufferObject {
-            model: Mat4::from_rotation_y(elapsed * (90.0 * PI / 180.0)),
+            // model: Mat4::from_rotation_y(elapsed * (90.0 * PI / 180.0)),
             // model: Mat4::IDENTITY,
-            view: Mat4::look_at_rh(Vec3::new(0.0, 0.0, 2.0), Vec3::new(0.0, 0.0, 0.0), Vec3::Y),
+            model: Mat4::from_rotation_z(elapsed * (90.0 * PI / 180.0)),
+            view: Mat4::look_at_rh(Vec3::new(2.0, 2.0, 2.0), Vec3::new(0.0, 0.0, 0.0), Vec3::Z),
             proj,
         };
 
@@ -2417,7 +2467,7 @@ impl VulkanApp {
         let clear_values = [
             vk::ClearValue {
                 color: vk::ClearColorValue {
-                    float32: [0.0, 0.0, 0.0, 1.0],
+                    float32: [0.2, 0.1, 0.1, 1.0],
                 },
             },
             vk::ClearValue {
@@ -2475,8 +2525,16 @@ impl VulkanApp {
                 *command_buffer,
                 self.index_buffer,
                 0,
-                vk::IndexType::UINT16,
+                vk::IndexType::UINT32,
             );
+
+            // replaced by model indices
+            // self.device.cmd_bind_index_buffer(
+            //     *command_buffer,
+            //     self.index_buffer,
+            //     0,
+            //     vk::IndexType::UINT16,
+            // );
 
             self.device.cmd_bind_descriptor_sets(
                 *command_buffer,
@@ -2488,8 +2546,17 @@ impl VulkanApp {
             );
 
             // self.device.cmd_draw(*command_buffer, 3, 1, 0, 0);
-            self.device
-                .cmd_draw_indexed(*command_buffer, Self::INDICES.len() as u32, 1, 0, 0, 0);
+            // replaced by model
+            // self.device
+            //     .cmd_draw_indexed(*command_buffer, Self::INDICES.len() as u32, 1, 0, 0, 0);
+            self.device.cmd_draw_indexed(
+                *command_buffer,
+                self.model_indices.len() as u32,
+                1,
+                0,
+                0,
+                0,
+            );
 
             self.device.cmd_end_render_pass(*command_buffer);
 
@@ -2746,7 +2813,12 @@ fn main() {
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event()
         .build()
         .unwrap();
-    let window = Arc::new(Window::new(&event_loop).unwrap());
+    let window = Arc::new(
+        WindowBuilder::new()
+            .with_title("Vulkan Port")
+            .build(&event_loop)
+            .unwrap(),
+    );
 
     let mut app = match VulkanApp::new(window.clone()) {
         Ok(app) => {
