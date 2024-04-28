@@ -303,6 +303,7 @@ struct VulkanApp {
     command_buffers: Vec<vk::CommandBuffer>,
 
     // textures
+    mip_levels: u32,
     texture_image: vk::Image,
     texture_image_memory: vk::DeviceMemory,
     texture_image_view: vk::ImageView,
@@ -632,6 +633,7 @@ impl VulkanApp {
         device: &ash::Device,
         tex_width: u32,
         tex_height: u32,
+        mip_levels: u32,
         format: vk::Format,
         image_tiling: vk::ImageTiling,
         image_usages: vk::ImageUsageFlags,
@@ -646,7 +648,7 @@ impl VulkanApp {
                     .height(tex_height)
                     .depth(1),
             )
-            .mip_levels(1)
+            .mip_levels(mip_levels)
             .array_layers(1)
             .format(format)
             .tiling(image_tiling)
@@ -694,7 +696,7 @@ impl VulkanApp {
         }
     }
 
-    fn create_texture_sampler(device: &ash::Device) -> VkResult<vk::Sampler> {
+    fn create_texture_sampler(device: &ash::Device, mip_levels: u32) -> VkResult<vk::Sampler> {
         let sampler_info = vk::SamplerCreateInfo::default()
             .mag_filter(vk::Filter::LINEAR)
             .min_filter(vk::Filter::LINEAR)
@@ -708,9 +710,9 @@ impl VulkanApp {
             .compare_enable(false)
             .compare_op(vk::CompareOp::ALWAYS)
             .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
-            .mip_lod_bias(0.0)
             .min_lod(0.0)
-            .max_lod(0.0);
+            .max_lod(mip_levels as f32)
+            .mip_lod_bias(0.0);
 
         unsafe {
             match device.create_sampler(&sampler_info, None) {
@@ -728,14 +730,22 @@ impl VulkanApp {
         device: &ash::Device,
         texture_image: vk::Image,
         format: vk::Format,
+        mip_levels: u32,
     ) -> VkResult<vk::ImageView> {
-        return Self::create_image_view(device, texture_image, format, vk::ImageAspectFlags::COLOR);
+        return Self::create_image_view(
+            device,
+            texture_image,
+            format,
+            mip_levels,
+            vk::ImageAspectFlags::COLOR,
+        );
     }
 
     fn create_image_view(
         device: &ash::Device,
         image: vk::Image,
         format: vk::Format,
+        mip_levels: u32,
         aspect_flags: vk::ImageAspectFlags,
     ) -> VkResult<vk::ImageView> {
         let create_info = vk::ImageViewCreateInfo::default()
@@ -762,7 +772,7 @@ impl VulkanApp {
                 vk::ImageSubresourceRange::default()
                     .aspect_mask(aspect_flags)
                     .base_mip_level(0)
-                    .level_count(1)
+                    .level_count(mip_levels)
                     .base_array_layer(0)
                     .layer_count(1),
             );
@@ -790,6 +800,7 @@ impl VulkanApp {
             device,
             swapchain_extent.width,
             swapchain_extent.height,
+            1,
             depth_format,
             vk::ImageTiling::OPTIMAL,
             vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
@@ -801,6 +812,7 @@ impl VulkanApp {
             device,
             depth_image,
             depth_format,
+            1,
             vk::ImageAspectFlags::DEPTH,
         )
         .unwrap();
@@ -812,6 +824,7 @@ impl VulkanApp {
             graphics_queue,
             depth_image,
             depth_format,
+            1,
             vk::ImageLayout::UNDEFINED,
             vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
         );
@@ -855,8 +868,8 @@ impl VulkanApp {
                 return format;
             }
         }
-        error!("Failed to find supported format");
-        panic!("Failed to find supported format");
+        error!("Failed to find supported formats: {:?}", candidates);
+        panic!("Failed to find supported formats: {:?}", candidates);
     }
 
     fn has_stencil_component(format: vk::Format) -> bool {
@@ -865,11 +878,13 @@ impl VulkanApp {
 
     fn create_texture_image(
         device: &ash::Device,
+        instance: &ash::Instance,
+        physical_device: &vk::PhysicalDevice,
         command_pool: &vk::CommandPool,
         graphics_queue: &vk::Queue,
         format: vk::Format,
         memory_prop: &vk::PhysicalDeviceMemoryProperties,
-    ) -> VkResult<(vk::Image, vk::DeviceMemory)> {
+    ) -> VkResult<(vk::Image, vk::DeviceMemory, u32)> {
         // replaced by model
         // let image = match image::open("src/textures/texture.jpg") {
         let image = match image::open("src/textures/viking_room.png") {
@@ -884,9 +899,11 @@ impl VulkanApp {
         let image_width = (&image_as_rgb).width();
         let image_height = (&image_as_rgb).height();
         let pixels = image_as_rgb.into_raw();
-        let image_size2 = (pixels.len() * std::mem::size_of::<u8>()) as vk::DeviceSize;
 
+        // both of these calculations give the same result. At least for now... I'm not sure which one to choose.
+        let image_size2 = (pixels.len() * std::mem::size_of::<u8>()) as vk::DeviceSize;
         let image_size = vk::DeviceSize::from(image.width() * image.height() * 4);
+        let mip_levels = ((image_width.max(image_height) as f32).log2().floor() + 1.0) as u32;
 
         // ----------------- TODO SCAR DE ACA -----------------------
         // se comparte en todas las creaciones de staging buffers
@@ -926,9 +943,12 @@ impl VulkanApp {
             // image.height(),
             image_width,
             image_height,
+            mip_levels,
             format,
             vk::ImageTiling::OPTIMAL,
-            vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
+            vk::ImageUsageFlags::TRANSFER_SRC
+                | vk::ImageUsageFlags::TRANSFER_DST
+                | vk::ImageUsageFlags::SAMPLED,
             memory_prop,
             vk::MemoryPropertyFlags::DEVICE_LOCAL,
         )
@@ -940,6 +960,7 @@ impl VulkanApp {
             graphics_queue,
             texture_image,
             format,
+            mip_levels,
             vk::ImageLayout::UNDEFINED,
             vk::ImageLayout::TRANSFER_DST_OPTIMAL,
         );
@@ -954,14 +975,31 @@ impl VulkanApp {
             image_width,
             image_height,
         );
-        Self::transition_image_layout(
+
+        // removed this on miplevel chapter. because`transition_image_layout` only performs layout transitions
+        // on the entire image. So after generating the mipmaps each level will transition to `SHADER_READ_ONLY_OPTIMAL`
+        // Self::transition_image_layout(
+        //     device,
+        //     command_pool,
+        //     graphics_queue,
+        //     texture_image,
+        //     format,
+        //     mip_levels,
+        //     vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+        //     vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        // );
+
+        Self::generate_mipmaps(
             device,
+            instance,
+            physical_device,
             command_pool,
             graphics_queue,
             texture_image,
             format,
-            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            image_width,
+            image_height,
+            mip_levels,
         );
 
         unsafe {
@@ -969,7 +1007,150 @@ impl VulkanApp {
             device.free_memory(staging_buffer_memory, None);
         }
 
-        Ok((texture_image, texture_image_memory))
+        Ok((texture_image, texture_image_memory, mip_levels))
+    }
+
+    fn generate_mipmaps(
+        device: &ash::Device,
+        instance: &ash::Instance,
+        physical_device: &vk::PhysicalDevice,
+        command_pool: &vk::CommandPool,
+        graphics_queue: &vk::Queue,
+        image: vk::Image,
+        format: vk::Format,
+        tex_width: u32,
+        tex_height: u32,
+        mip_levels: u32,
+    ) {
+        // It should be noted that generating mipmaps at runtime is an uncommon practice.
+        // They should be generated in software and stored in the texture file.
+        Self::find_supported_format(
+            instance,
+            physical_device,
+            &[format],
+            vk::ImageTiling::OPTIMAL,
+            vk::FormatFeatureFlags::SAMPLED_IMAGE_FILTER_LINEAR,
+        );
+
+        let command_buffer = Self::begin_single_time_commands(device, command_pool);
+        let mut image_memory_barrier = vk::ImageMemoryBarrier::default()
+            .image(image)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .subresource_range(
+                vk::ImageSubresourceRange::default()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .base_array_layer(0)
+                    .layer_count(1)
+                    .level_count(1),
+            );
+
+        let mut mip_width = tex_width as i32;
+        let mut mip_height = tex_height as i32;
+
+        for i in 1..mip_levels {
+            image_memory_barrier.subresource_range.base_mip_level = i - 1;
+            image_memory_barrier.old_layout = vk::ImageLayout::TRANSFER_DST_OPTIMAL;
+            image_memory_barrier.new_layout = vk::ImageLayout::TRANSFER_SRC_OPTIMAL;
+            image_memory_barrier.src_access_mask = vk::AccessFlags::TRANSFER_WRITE;
+            image_memory_barrier.dst_access_mask = vk::AccessFlags::TRANSFER_READ;
+
+            unsafe {
+                device.cmd_pipeline_barrier(
+                    command_buffer,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[image_memory_barrier.clone()],
+                );
+            }
+
+            let blits = [vk::ImageBlit::default()
+                .src_offsets([
+                    vk::Offset3D { x: 0, y: 0, z: 0 },
+                    vk::Offset3D {
+                        x: mip_width,
+                        y: mip_height,
+                        z: 1,
+                    },
+                ])
+                .src_subresource(
+                    vk::ImageSubresourceLayers::default()
+                        .aspect_mask(vk::ImageAspectFlags::COLOR)
+                        .mip_level(i - 1)
+                        .base_array_layer(0)
+                        .layer_count(1),
+                )
+                .dst_offsets([
+                    vk::Offset3D { x: 0, y: 0, z: 0 },
+                    vk::Offset3D {
+                        x: if mip_width > 1 { mip_width / 2 } else { 1 },
+                        y: if mip_height > 1 { mip_height / 2 } else { 1 },
+                        z: 1,
+                    },
+                ])
+                .dst_subresource(
+                    vk::ImageSubresourceLayers::default()
+                        .aspect_mask(vk::ImageAspectFlags::COLOR)
+                        .mip_level(i)
+                        .base_array_layer(0)
+                        .layer_count(1),
+                )];
+
+            unsafe {
+                device.cmd_blit_image(
+                    command_buffer,
+                    image,
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                    image,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    &blits,
+                    vk::Filter::LINEAR,
+                );
+
+                image_memory_barrier.old_layout = vk::ImageLayout::TRANSFER_SRC_OPTIMAL;
+                image_memory_barrier.new_layout = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
+                image_memory_barrier.src_access_mask = vk::AccessFlags::TRANSFER_READ;
+                image_memory_barrier.dst_access_mask = vk::AccessFlags::SHADER_READ;
+                device.cmd_pipeline_barrier(
+                    command_buffer,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::FRAGMENT_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[image_memory_barrier.clone()],
+                );
+            }
+
+            if mip_width > 1 {
+                mip_width /= 2;
+            }
+            if mip_height > 1 {
+                mip_height /= 2;
+            }
+        }
+
+        unsafe {
+            image_memory_barrier.subresource_range.base_mip_level = mip_levels - 1;
+            image_memory_barrier.old_layout = vk::ImageLayout::TRANSFER_DST_OPTIMAL;
+            image_memory_barrier.new_layout = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
+            image_memory_barrier.src_access_mask = vk::AccessFlags::TRANSFER_WRITE;
+            image_memory_barrier.dst_access_mask = vk::AccessFlags::SHADER_READ;
+
+            device.cmd_pipeline_barrier(
+                command_buffer,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[image_memory_barrier.clone()],
+            );
+        }
+        Self::end_single_time_commands(device, &command_buffer, command_pool, graphics_queue);
     }
 
     fn copy_buffer_to_image(
@@ -1204,6 +1385,7 @@ impl VulkanApp {
                 device,
                 *image,
                 swapchain_image_format,
+                1,
                 vk::ImageAspectFlags::COLOR,
             ) {
                 Ok(view) => image_views.push(view),
@@ -1380,8 +1562,10 @@ impl VulkanApp {
         .unwrap();
 
         let image_format = vk::Format::R8G8B8A8_SRGB;
-        let (texture_image, texture_image_memory) = Self::create_texture_image(
+        let (texture_image, texture_image_memory, mip_levels) = Self::create_texture_image(
             &device,
+            &instance,
+            &physical_device,
             &command_pool,
             &graphics_queue,
             image_format,
@@ -1390,12 +1574,13 @@ impl VulkanApp {
         .unwrap();
 
         let texture_image_view =
-            Self::create_texture_image_view(&device, texture_image, image_format).unwrap();
+            Self::create_texture_image_view(&device, texture_image, image_format, mip_levels)
+                .unwrap();
         info!(
             "Max sampler anisotropy: {}",
             physical_device_properties.limits.max_sampler_anisotropy
         );
-        let texture_sampler = Self::create_texture_sampler(&device).unwrap();
+        let texture_sampler = Self::create_texture_sampler(&device, mip_levels).unwrap();
 
         let (model_vertices, model_indices) = Self::load_model();
 
@@ -1506,6 +1691,7 @@ impl VulkanApp {
             command_pool,
             command_buffers,
 
+            mip_levels,
             texture_image,
             texture_image_memory,
             texture_image_view,
@@ -1858,6 +2044,7 @@ impl VulkanApp {
         graphics_queue: &vk::Queue,
         image: vk::Image,
         format: vk::Format,
+        mip_levels: u32,
         old_layout: vk::ImageLayout,
         new_layout: vk::ImageLayout,
     ) {
@@ -1873,7 +2060,7 @@ impl VulkanApp {
                 vk::ImageSubresourceRange::default()
                     .aspect_mask(vk::ImageAspectFlags::COLOR)
                     .base_mip_level(0)
-                    .level_count(1)
+                    .level_count(mip_levels)
                     .base_array_layer(0)
                     .layer_count(1),
             );
